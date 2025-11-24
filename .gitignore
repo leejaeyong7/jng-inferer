@@ -1,0 +1,12 @@
+venv
+weights
+binaries
+.vscode
+__pycache__/
+*.pyc
+.DS_Store
+data/
+out/
+olds
+.ipynb_checkpoints
+output
