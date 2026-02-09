@@ -2,21 +2,16 @@ import sys
 
 sys.path.append(".")
 from pathlib import Path
-from modules.preprocessor import process_video
-from modules.preprocessor.preprocess.utils.video_ops import extract_video
+from modules.preprocessor.preprocess.utils.video_ops import (
+    extract_video,
+    create_video,
+    enumerate_vid,
+    get_vid_count,
+)
 from PIL import Image, ImageDraw, ImageFont
-from inferer import compute_scores
-
-ffmpeg_path = "binaries/ffmpeg.exe"
-detection_model_path = "binaries/jng.det.onnx"
-keypoint_model_path = "binaries/jng.pose.onnx"
 
 
-def infer(model_folder, vid_file, output_folder):
-    video_path = Path(vid_file)
-    output_path = Path(output_folder)
-    processed_path = output_path / "processed"
-
+def infer(proc_folder):
     process_video(
         ffmpeg_path,
         detection_model_path,
@@ -29,6 +24,18 @@ def infer(model_folder, vid_file, output_folder):
     with open(count_file, "w") as f:
         f.write("\n".join([str(c) for c in counts]))
     print(f"Counts saved to {count_file}")
+
+    extract_video(ffmpeg_path, video_path, output_path / "raw_frames")
+    num_frames = get_vid_count(output_path / "raw_frames")
+    draw_font = ImageFont.truetype("binaries/superbasic.ttf", 32)
+    for i in range(num_frames):
+        frame_path = output_path / "raw_frames" / f"frame_{i:05d}.png"
+        img = Image.open(frame_path).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 10), f"Count: {counts[i]}", font=draw_font, fill=(255, 0, 0))
+        img.save(frame_path)
+
+    create_video(ffmpeg_path, output_path / "raw_frames", output_path / "output.mp4")
 
     return
 

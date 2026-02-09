@@ -1,7 +1,7 @@
 from pathlib import Path
 from .utils.inference_op import parallel_load_data
 from .utils.video_ops import extract_video, create_video, enumerate_vid, get_vid_count
-from .utils.score_op import scores_to_counts
+from .utils.score_op import scores_to_counts_simu, scores_to_counts_alt
 from .utils.onnx_op import (
     load_frame_feature_extractor,
     load_score_computer,
@@ -9,7 +9,7 @@ from .utils.onnx_op import (
 )
 
 
-def compute_scores(model_folder, processed_path):
+def compute_scores(model_folder, processed_path, model_type="simultaneous"):
     model_path = Path(model_folder)
     processed_path = Path(processed_path)
     # output_path contains images / keypoints folder
@@ -24,5 +24,9 @@ def compute_scores(model_folder, processed_path):
     batch_latents = batchfiy_latents(frame_offsets, zero_latent, latents)
     scores = sco(batch_latents)
 
+    if model_type == "simultaneous":
+        scores_to_counts = scores_to_counts_simu
+    else:
+        scores_to_counts = scores_to_counts_alt
     counts = scores_to_counts(scores)
     return counts
