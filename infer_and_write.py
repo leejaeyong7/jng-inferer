@@ -68,4 +68,9 @@ if __name__ == "__main__":
     parser.add_argument("--video_file", type=str, help="Path to the video file")
     parser.add_argument("--output_folder", type=str, help="Path to the output folder")
     args = parser.parse_args()
-    infer(args.model_folder, args.video_file, args.output_folder)
+    infer(
+        args.model_folder,
+        args.video_file,
+        args.output_folder,
+        model_type=args.model_type,
+    )
