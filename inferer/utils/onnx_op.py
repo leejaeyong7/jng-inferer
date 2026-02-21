@@ -2,11 +2,13 @@ import numpy as np
 from tqdm import tqdm
 import onnxruntime as ort
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def load_onnx_model(onnx_model_path):
-    sess = ort.InferenceSession(str(onnx_model_path))
+    sess = ort.InferenceSession(
+        str(onnx_model_path), providers=["CUDAExecutionProvider"]
+    )
     inputs = sess.get_inputs()
     outputs = sess.get_outputs()
     return sess, inputs, outputs
@@ -23,22 +25,33 @@ def extract_frame_feature(ffe_sess, ffe_inputs, ffe_outputs, inputs):
     )[0]
 
 
-def extract_frame_features(ffe_sess, ffe_inputs, ffe_outputs, imgs, kps):
-    latents_list = []
+def extract_frame_features(ffe_sess, ffe_inputs, ffe_outputs, imgs, kps, callback=None):
     inputs = list(zip(imgs, kps))
+    extract_frame_feature_partial = partial(
+        extract_frame_feature, ffe_sess, ffe_inputs, ffe_outputs
+    )
+    total = len(inputs)
+    latents_list = []
+    latents_dict = {}
+    msg = "프레임 특징 추출 중..."
     with ThreadPoolExecutor(max_workers=16) as executor:
-        latents_list = list(
-            tqdm(
-                executor.map(
-                    partial(extract_frame_feature, ffe_sess, ffe_inputs, ffe_outputs),
-                    inputs,
-                ),
-                total=len(inputs),
-                desc="Extracting frame features",
-            )
-        )
-    latents = np.concatenate(latents_list, axis=0)
+        task_dict = {}
 
+        for iid, i in enumerate(inputs):
+            task = executor.submit(extract_frame_feature_partial, i)
+            task_dict[task] = iid
+
+        for task in as_completed(task_dict):
+            iid = task_dict[task]
+            latents_dict[iid] = task.result()
+
+            if callback:
+                callback(msg, iid, total)
+
+    for i in range(total):
+        latents_list.append(latents_dict[i])
+
+    latents = np.concatenate(latents_list, axis=0)
     zero_img = np.zeros_like(imgs[0])
     zero_kp = np.zeros_like(kps[0])
     zero_latent = extract_frame_feature(
@@ -75,19 +88,29 @@ def compute_score(sco_sess, sco_inputs, sco_outputs, latent):
     return scores[0]
 
 
-def compute_scores(sco_sess, sco_inputs, sco_outputs, latents):
+def compute_scores(sco_sess, sco_inputs, sco_outputs, latents, callback=None):
+    """
+    callback: function(i, total) called after each score is computed
+    """
     scores = []
+    compute_score_partial = partial(compute_score, sco_sess, sco_inputs, sco_outputs)
+    total = len(latents)
+    score_dict = {}
+    msg = "FSD 점수 계산 중..."
     with ThreadPoolExecutor(max_workers=16) as executor:
-        scores = list(
-            tqdm(
-                executor.map(
-                    partial(compute_score, sco_sess, sco_inputs, sco_outputs),
-                    latents,
-                ),
-                total=len(latents),
-                desc="Computing scores",
-            )
-        )
+        task_dict = {}
+        for i, latent in enumerate(latents):
+            task = executor.submit(compute_score_partial, latent)
+            task_dict[task] = i
+
+        for task in as_completed(task_dict):
+            i = task_dict[task]
+            score_dict[i] = task.result()
+
+            if callback:
+                callback(msg, i, total)
+    for i in range(total):
+        scores.append(score_dict[i])
     return np.concatenate(scores)
 
 
