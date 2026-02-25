@@ -1,14 +1,32 @@
 import numpy as np
-from tqdm import tqdm
 import onnxruntime as ort
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def load_onnx_model(onnx_model_path):
-    sess = ort.InferenceSession(
-        str(onnx_model_path), providers=["CUDAExecutionProvider"]
-    )
+def _resolve_providers(device="auto"):
+    available = set(ort.get_available_providers())
+    if device == "cpu":
+        return ["CPUExecutionProvider"]
+    if device == "cuda":
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError("CUDAExecutionProvider is not available in this runtime.")
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    ordered = [
+        "CUDAExecutionProvider",
+        "CoreMLExecutionProvider",
+        "NNAPIExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+    providers = [p for p in ordered if p in available]
+    if "CPUExecutionProvider" not in providers:
+        providers.append("CPUExecutionProvider")
+    return providers
+
+
+def load_onnx_model(onnx_model_path, device="auto"):
+    sess = ort.InferenceSession(str(onnx_model_path), providers=_resolve_providers(device))
     inputs = sess.get_inputs()
     outputs = sess.get_outputs()
     return sess, inputs, outputs
@@ -114,11 +132,11 @@ def compute_scores(sco_sess, sco_inputs, sco_outputs, latents, callback=None):
     return np.concatenate(scores)
 
 
-def load_frame_feature_extractor(ffe_model_path):
-    ffe_sess, ffe_inputs, ffe_outputs = load_onnx_model(ffe_model_path)
+def load_frame_feature_extractor(ffe_model_path, device="auto"):
+    ffe_sess, ffe_inputs, ffe_outputs = load_onnx_model(ffe_model_path, device=device)
     return partial(extract_frame_features, ffe_sess, ffe_inputs, ffe_outputs)
 
 
-def load_score_computer(sco_model_path):
-    sco_sess, sco_inputs, sco_outputs = load_onnx_model(sco_model_path)
+def load_score_computer(sco_model_path, device="auto"):
+    sco_sess, sco_inputs, sco_outputs = load_onnx_model(sco_model_path, device=device)
     return partial(compute_scores, sco_sess, sco_inputs, sco_outputs)

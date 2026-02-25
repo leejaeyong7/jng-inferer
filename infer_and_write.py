@@ -1,76 +1,118 @@
 import sys
 
 sys.path.append(".")
+
 from pathlib import Path
-from modules.preprocessor import process_video
-from modules.preprocessor.preprocess.utils.video_ops import (
-    extract_video,
-    create_video,
-    enumerate_vid,
-    get_vid_count,
-)
 from PIL import Image, ImageDraw, ImageFont
-from inferer import compute_scores
 
-ffmpeg_path = "binaries/ffmpeg.exe"
-detection_model_path = "binaries/jng.det.onnx"
-keypoint_model_path = "binaries/jng.pose.onnx"
+from inferer import OnlineJNGInferer
+from modules.preprocessor import iter_online_processed_frames
+from modules.preprocessor.preprocess.utils.video_ops import create_video
 
 
-def infer(model_folder, vid_file, output_folder, model_type="simultaneous"):
-    video_path = Path(vid_file)
+FFMPEG_PATH = "binaries/ffmpeg.exe"
+DETECTION_MODEL_PATH = "binaries/jng.det.onnx"
+KEYPOINT_MODEL_PATH = "binaries/jng.pose.onnx"
+FONT_PATH = "binaries/superbasic.ttf"
+
+
+def _load_font(size=96):
+    try:
+        return ImageFont.truetype(FONT_PATH, size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def infer_and_write(
+    model_folder,
+    video_file,
+    output_folder,
+    model_type="simultaneous",
+    device="auto",
+):
     output_path = Path(output_folder)
-    processed_path = output_path / "processed"
+    output_path.mkdir(parents=True, exist_ok=True)
+    count_frame_path = output_path / "counts_frames"
+    count_frame_path.mkdir(parents=True, exist_ok=True)
+    raw_frame_path = output_path / "raw_frames"
+    raw_frame_path.mkdir(parents=True, exist_ok=True)
 
-    process_video(
-        ffmpeg_path,
-        detection_model_path,
-        keypoint_model_path,
-        video_path,
-        processed_path,
+    inferer = OnlineJNGInferer(
+        model_folder=model_folder,
+        model_type=model_type,
+        device=device,
     )
-    counts = compute_scores(model_folder, processed_path, model_type=model_type)
-    count_file = processed_path / "counts.txt"
-    with open(count_file, "w") as f:
-        f.write("\n".join([str(c) for c in counts]))
-    print(f"Counts saved to {count_file}")
+    draw_font = _load_font()
 
-    (output_path / "raw_frames").mkdir(parents=True, exist_ok=True)
-    extract_video(ffmpeg_path, video_path, output_path / "raw_frames")
-    num_frames = get_vid_count(output_path / "raw_frames")
-    draw_font = ImageFont.truetype("binaries/superbasic.ttf", 128)
-    count_img_path = output_path / "counts_frames"
-    count_img_path.mkdir(parents=True, exist_ok=True)
-    for iid, np_img in enumerate_vid(output_path / "raw_frames"):
-        img = Image.fromarray(np_img).convert("RGB")
+    for frame_id, raw_frame, crop_img, keypoints in iter_online_processed_frames(
+        ffmpeg_path=FFMPEG_PATH,
+        detection_model_path=DETECTION_MODEL_PATH,
+        keypoint_model_path=KEYPOINT_MODEL_PATH,
+        video_path=Path(video_file),
+    ):
+        inferer.step(crop_img, keypoints)
+        Image.fromarray(raw_frame).convert("RGB").save(raw_frame_path / f"{frame_id:06d}.jpg")
+
+    counts = inferer.finalize()
+
+    for frame_id, count in enumerate(counts):
+        img = Image.open(raw_frame_path / f"{frame_id:06d}.jpg").convert("RGB")
         draw = ImageDraw.Draw(img)
-        draw.text((10, 10), f"Count: {counts[iid]}", font=draw_font, fill=(0, 255, 0))
-        img.save(count_img_path / f"{iid:06d}.jpg")
+        draw.text((10, 10), f"Count: {count}", font=draw_font, fill=(0, 255, 0))
+        img.save(count_frame_path / f"{frame_id:06d}.jpg")
 
-    (output_path / "output.mp4").unlink(missing_ok=True)
-    create_video(ffmpeg_path, output_path / "counts_frames", output_path / "output.mp4")
+    output_video = output_path / "output.mp4"
+    output_video.unlink(missing_ok=True)
+    create_video(FFMPEG_PATH, count_frame_path, output_video)
+
     with open(output_path / "counts.txt", "w") as f:
         f.write("\n".join([str(c) for c in counts]))
 
-    print(f"Output video saved to {output_path / 'output.mp4'}")
+    print(f"Counts saved to {output_path / 'counts.txt'}")
+    print(f"Output video saved to {output_video}")
+    return counts
 
-    return
+
+def infer(model_folder, vid_file, output_folder, model_type="simultaneous"):
+    return infer_and_write(
+        model_folder=model_folder,
+        video_file=vid_file,
+        output_folder=output_folder,
+        model_type=model_type,
+    )
 
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument("--model_folder", type=str, help="Path to the model folder")
+    parser.add_argument("--model_folder", type=str, required=True, help="Path to model dir")
     parser.add_argument(
-        "--model_type", type=str, default="alternating", help="Type of the model"
+        "--model_type",
+        type=str,
+        default="alternating",
+        choices=["simultaneous", "alternating"],
     )
-    parser.add_argument("--video_file", type=str, help="Path to the video file")
-    parser.add_argument("--output_folder", type=str, help="Path to the output folder")
+    parser.add_argument("--video_file", type=str, required=True, help="Path to input video")
+    parser.add_argument("--output_folder", type=str, required=True, help="Path to output dir")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="ONNX runtime provider preference",
+    )
+    parser.add_argument(
+        "--future_context_policy",
+        type=str,
+        default=None,
+        help="Deprecated: kept for CLI compatibility. Ignored.",
+    )
     args = parser.parse_args()
-    infer(
-        args.model_folder,
-        args.video_file,
-        args.output_folder,
+    infer_and_write(
+        model_folder=args.model_folder,
+        video_file=args.video_file,
+        output_folder=args.output_folder,
         model_type=args.model_type,
+        device=args.device,
     )
