@@ -6,7 +6,16 @@ from run_inference import infer_online
 from infer_and_write import infer_and_write
 
 
-def infer(model_folder, vid_file, model_type, output_folder, with_video, device):
+def infer(
+    model_folder,
+    vid_file,
+    model_type,
+    output_folder,
+    with_video,
+    device,
+    show_progress,
+    visualize_tracking,
+):
     if with_video:
         return infer_and_write(
             model_folder=model_folder,
@@ -14,6 +23,8 @@ def infer(model_folder, vid_file, model_type, output_folder, with_video, device)
             output_folder=output_folder,
             model_type=model_type,
             device=device,
+            show_progress=show_progress,
+            visualize_tracking=visualize_tracking,
         )
     return infer_online(
         model_folder=model_folder,
@@ -21,6 +32,7 @@ def infer(model_folder, vid_file, model_type, output_folder, with_video, device)
         output_folder=output_folder,
         model_type=model_type,
         device=device,
+        show_progress=show_progress,
     )
 
 
@@ -49,6 +61,16 @@ if __name__ == "__main__":
         choices=["auto", "cpu", "cuda"],
         help="ONNX runtime provider preference",
     )
+    parser.add_argument(
+        "--show_progress",
+        action="store_true",
+        help="Show preprocessing/inference progress",
+    )
+    parser.add_argument(
+        "--visualize_tracking",
+        action="store_true",
+        help="When --with_video is set, also write tracking frames",
+    )
     args = parser.parse_args()
     infer(
         model_folder=args.model_folder,
@@ -57,4 +79,6 @@ if __name__ == "__main__":
         output_folder=args.output_folder,
         with_video=args.with_video,
         device=args.device,
+        show_progress=args.show_progress,
+        visualize_tracking=args.visualize_tracking,
     )

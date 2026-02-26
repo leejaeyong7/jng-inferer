@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from inferer import OnlineJNGInferer
+from inferer.utils.progress_op import build_progress_callback
 from modules.preprocessor import iter_online_processed_frames
 
 
@@ -22,6 +23,7 @@ def infer_online(
     model_type="simultaneous",
     device="auto",
     save_processed=False,
+    show_progress=False,
 ):
     output_path = Path(output_folder)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -35,21 +37,27 @@ def infer_online(
         model_type=model_type,
         device=device,
     )
+    callback_ptr, close_progress = build_progress_callback(show_progress)
 
-    for frame_id, _, crop_img, keypoints in iter_online_processed_frames(
-        ffmpeg_path=FFMPEG_PATH,
-        detection_model_path=DETECTION_MODEL_PATH,
-        keypoint_model_path=KEYPOINT_MODEL_PATH,
-        video_path=Path(video_file),
-    ):
-        inferer.step(crop_img, keypoints)
+    try:
+        for frame_id, _, crop_img, keypoints in iter_online_processed_frames(
+            ffmpeg_path=FFMPEG_PATH,
+            detection_model_path=DETECTION_MODEL_PATH,
+            keypoint_model_path=KEYPOINT_MODEL_PATH,
+            video_path=Path(video_file),
+            callback_ptr=callback_ptr,
+            device=device,
+        ):
+            inferer.step(crop_img, keypoints)
 
-        if save_processed:
-            prefix = f"{frame_id:06d}"
-            Image.fromarray(crop_img).save(
-                output_path / "processed" / "images" / f"{prefix}.jpg"
-            )
-            np.save(output_path / "processed" / "keypoints" / f"{prefix}.npy", keypoints)
+            if save_processed:
+                prefix = f"{frame_id:06d}"
+                Image.fromarray(crop_img).save(
+                    output_path / "processed" / "images" / f"{prefix}.jpg"
+                )
+                np.save(output_path / "processed" / "keypoints" / f"{prefix}.npy", keypoints)
+    finally:
+        close_progress()
 
     counts = inferer.finalize()
     with open(output_path / "counts.txt", "w") as f:
@@ -99,6 +107,11 @@ if __name__ == "__main__":
         default=None,
         help="Deprecated: kept for CLI compatibility. Ignored.",
     )
+    parser.add_argument(
+        "--show_progress",
+        action="store_true",
+        help="Show preprocessing/inference progress",
+    )
     args = parser.parse_args()
     infer_online(
         model_folder=args.model_folder,
@@ -107,4 +120,5 @@ if __name__ == "__main__":
         model_type=args.model_type,
         device=args.device,
         save_processed=args.save_processed,
+        show_progress=args.show_progress,
     )

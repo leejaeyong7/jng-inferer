@@ -48,6 +48,7 @@ class OnlineJNGInferer:
         self.ffe_dtype = _tensor_dtype(self.ffe_inputs[0])
         self.kp_dtype = _tensor_dtype(self.ffe_inputs[1])
         self.sco_dtype = _tensor_dtype(self.sco_inputs[0])
+        self.model_type = model_type
 
         if model_type == "alternating":
             self.counter = AlternatingCounter()
@@ -62,6 +63,25 @@ class OnlineJNGInferer:
         self.finalized_scores = []
         self.live_count = 0
         self.zero_latent = self._compute_zero_latent()
+        self._validate_model_type_against_scorer()
+
+    def _validate_model_type_against_scorer(self):
+        probe_context = np.stack([self.zero_latent for _ in self.frame_offsets], axis=0)
+        probe_context = probe_context.astype(self.sco_dtype, copy=False)
+        probe_score = self.sco_sess.run(
+            [self.sco_outputs[0].name], {self.sco_inputs[0].name: probe_context[None]}
+        )[0][0]
+        score_dim = int(np.asarray(probe_score).shape[-1])
+        if self.model_type == "alternating" and score_dim != 5:
+            raise ValueError(
+                f"Alternating model_type expects scorer output dim 5, but got {score_dim}. "
+                "Use matching --model_type and model weights."
+            )
+        if self.model_type == "simultaneous" and score_dim != 4:
+            raise ValueError(
+                f"Simultaneous model_type expects scorer output dim 4, but got {score_dim}. "
+                "Use matching --model_type and model weights."
+            )
 
     def _compute_zero_latent(self):
         zero_img = np.zeros((3, 256, 192), dtype=self.ffe_dtype)
