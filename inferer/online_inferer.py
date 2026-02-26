@@ -59,6 +59,7 @@ class OnlineJNGInferer:
         self.latest_frame_idx = -1
         self.next_score_frame_idx = 0
         self.finalized_counts = []
+        self.finalized_scores = []
         self.live_count = 0
         self.zero_latent = self._compute_zero_latent()
 
@@ -101,6 +102,7 @@ class OnlineJNGInferer:
             [self.sco_outputs[0].name], {self.sco_inputs[0].name: context[None]}
         )[0][0]
         self.live_count = int(self.counter.update(score))
+        self.finalized_scores.append(score)
         self.finalized_counts.append(self.live_count)
         return score
 
@@ -142,3 +144,8 @@ class OnlineJNGInferer:
             self.next_score_frame_idx += 1
         self._gc_history()
         return list(self.finalized_counts)
+
+    def get_finalized_scores(self):
+        if len(self.finalized_scores) == 0:
+            return np.empty((0, 0), dtype=self.sco_dtype)
+        return np.stack(self.finalized_scores, axis=0)
