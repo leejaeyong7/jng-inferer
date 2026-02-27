@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+from time import perf_counter
 
 from .utils.onnx_op import load_onnx_model
 from .utils.score_op import SimultaneousCounter, AlternatingCounter
@@ -33,6 +34,7 @@ class OnlineJNGInferer:
         model_type="simultaneous",
         frame_offsets=DEFAULT_FRAME_OFFSETS,
         device="auto",
+        stage_profiler=None,
     ):
         self.model_folder = Path(model_folder)
         self.frame_offsets = tuple(frame_offsets)
@@ -49,6 +51,7 @@ class OnlineJNGInferer:
         self.kp_dtype = _tensor_dtype(self.ffe_inputs[1])
         self.sco_dtype = _tensor_dtype(self.sco_inputs[0])
         self.model_type = model_type
+        self.stage_profiler = stage_profiler
 
         if model_type == "alternating":
             self.counter = AlternatingCounter()
@@ -134,7 +137,10 @@ class OnlineJNGInferer:
     def step(self, crop_img, keypoints):
         img_chw = _prepare_frame_input(crop_img).astype(self.ffe_dtype)
         keypoints = np.asarray(keypoints, dtype=self.kp_dtype)
+        feature_start = perf_counter()
         latent = self._extract_latent(img_chw, keypoints)
+        if self.stage_profiler is not None:
+            self.stage_profiler.add("feature", perf_counter() - feature_start)
 
         self.latest_frame_idx += 1
         self.latent_history[self.latest_frame_idx] = latent
@@ -142,10 +148,13 @@ class OnlineJNGInferer:
         # Score only frames with full future context already available.
         ready_until = self.latest_frame_idx - self.max_offset
         while self.next_score_frame_idx <= ready_until:
+            score_start = perf_counter()
             self._score_frame(
                 self.next_score_frame_idx,
                 use_zero_for_missing=False,
             )
+            if self.stage_profiler is not None:
+                self.stage_profiler.add("score", perf_counter() - score_start)
             self.next_score_frame_idx += 1
 
         self._gc_history()
@@ -157,10 +166,13 @@ class OnlineJNGInferer:
         mirroring the original offline batch behavior at sequence end.
         """
         while self.next_score_frame_idx <= self.latest_frame_idx:
+            score_start = perf_counter()
             self._score_frame(
                 self.next_score_frame_idx,
                 use_zero_for_missing=True,
             )
+            if self.stage_profiler is not None:
+                self.stage_profiler.add("score", perf_counter() - score_start)
             self.next_score_frame_idx += 1
         self._gc_history()
         return list(self.finalized_counts)

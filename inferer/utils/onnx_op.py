@@ -2,6 +2,21 @@ import numpy as np
 import onnxruntime as ort
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
+
+def _cuda_provider_options():
+    opts = {
+        "device_id": str(_read_int_env("JNG_CUDA_DEVICE_ID", 0)),
+        "arena_extend_strategy": "kNextPowerOfTwo",
+        "cudnn_conv_algo_search": "HEURISTIC",
+        "do_copy_in_default_stream": "1",
+        "cudnn_conv_use_max_workspace": "1",
+    }
+    gpu_mem_limit = _read_int_env("JNG_CUDA_GPU_MEM_LIMIT", 0)
+    if gpu_mem_limit > 0:
+        opts["gpu_mem_limit"] = str(gpu_mem_limit)
+    return opts
 
 
 def _resolve_providers(device="auto"):
@@ -11,22 +26,57 @@ def _resolve_providers(device="auto"):
     if device == "cuda":
         if "CUDAExecutionProvider" not in available:
             raise RuntimeError("CUDAExecutionProvider is not available in this runtime.")
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return [("CUDAExecutionProvider", _cuda_provider_options()), "CPUExecutionProvider"]
 
-    ordered = [
-        "CUDAExecutionProvider",
-        "CoreMLExecutionProvider",
-        "NNAPIExecutionProvider",
-        "CPUExecutionProvider",
-    ]
-    providers = [p for p in ordered if p in available]
+    providers = []
+    if "CUDAExecutionProvider" in available:
+        providers.append(("CUDAExecutionProvider", _cuda_provider_options()))
+    for p in ["CoreMLExecutionProvider", "NNAPIExecutionProvider", "CPUExecutionProvider"]:
+        if p in available:
+            providers.append(p)
     if "CPUExecutionProvider" not in providers:
         providers.append("CPUExecutionProvider")
     return providers
 
 
+def _read_int_env(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _build_session_options():
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    cpu_count = os.cpu_count() or 1
+    default_intra = max(1, min(4, cpu_count))
+    sess_opts.intra_op_num_threads = _read_int_env(
+        "JNG_ORT_INTRA_OP_THREADS", default_intra
+    )
+    sess_opts.inter_op_num_threads = _read_int_env("JNG_ORT_INTER_OP_THREADS", 1)
+    sess_opts.enable_cpu_mem_arena = True
+    sess_opts.enable_mem_pattern = True
+    sess_opts.log_severity_level = 3
+    return sess_opts
+
+
 def load_onnx_model(onnx_model_path, device="auto"):
-    sess = ort.InferenceSession(str(onnx_model_path), providers=_resolve_providers(device))
+    sess = ort.InferenceSession(
+        str(onnx_model_path),
+        sess_options=_build_session_options(),
+        providers=_resolve_providers(device),
+    )
+    active_providers = sess.get_providers()
+    if device == "cuda" and "CUDAExecutionProvider" not in active_providers:
+        raise RuntimeError(
+            f"CUDA was requested, but session providers are {active_providers}. "
+            "Install/configure onnxruntime-gpu and CUDA libraries."
+        )
     inputs = sess.get_inputs()
     outputs = sess.get_outputs()
     return sess, inputs, outputs
