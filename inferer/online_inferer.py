@@ -3,14 +3,19 @@ import numpy as np
 from time import perf_counter
 
 from .utils.onnx_op import load_onnx_model
+from .utils.model_path_op import resolve_feature_score_model_files
 from .utils.score_op import SimultaneousCounter, AlternatingCounter
 
 
 DEFAULT_FRAME_OFFSETS = (-16, -8, -4, -2, -1, 0, 1, 2, 4, 8)
 
 
-def _tensor_dtype(ort_input):
-    if ort_input.type == "tensor(float16)":
+def _tensor_dtype(model_input):
+    scale, _ = getattr(model_input, "quantization", (0.0, 0))
+    if float(scale) > 0.0:
+        # Quantized TFLite tensors still receive float preprocessing input in this pipeline.
+        return np.float32
+    if model_input.type == "tensor(float16)":
         return np.float16
     return np.float32
 
@@ -20,7 +25,36 @@ def _prepare_frame_input(img):
     if arr.ndim != 3 or arr.shape[2] != 3:
         raise ValueError("Expected RGB frame with shape HxWx3.")
     arr = arr.astype(np.float32) / 255.0
-    return arr.transpose(2, 0, 1)
+    return arr
+
+
+def _infer_model_image_layout(shape_without_batch):
+    if len(shape_without_batch) != 3:
+        raise ValueError(
+            f"Expected 3D image shape without batch, got {shape_without_batch}."
+        )
+    if shape_without_batch[0] == 3 and shape_without_batch[2] != 3:
+        return "nchw"
+    if shape_without_batch[2] == 3:
+        return "nhwc"
+    raise ValueError(f"Could not infer image layout from shape {shape_without_batch}.")
+
+
+def _align_image_layout(img, target_layout):
+    arr = np.asarray(img)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected 3D image tensor, got {arr.shape}.")
+
+    src_is_chw = arr.shape[0] == 3 and arr.shape[2] != 3
+    src_is_hwc = arr.shape[2] == 3
+    if not src_is_chw and not src_is_hwc:
+        raise ValueError(
+            f"Could not infer image layout from shape {arr.shape}. Expected CHW or HWC."
+        )
+
+    if target_layout == "nchw":
+        return arr if src_is_chw else arr.transpose(2, 0, 1)
+    return arr if src_is_hwc else arr.transpose(1, 2, 0)
 
 
 class OnlineJNGInferer:
@@ -41,15 +75,21 @@ class OnlineJNGInferer:
         self.min_offset = min(self.frame_offsets)
         self.max_offset = max(self.frame_offsets)
 
+        ffe_model_path, sco_model_path = resolve_feature_score_model_files(self.model_folder)
         self.ffe_sess, self.ffe_inputs, self.ffe_outputs = load_onnx_model(
-            self.model_folder / "jng.feature.onnx", device=device
+            ffe_model_path,
+            device=device,
         )
         self.sco_sess, self.sco_inputs, self.sco_outputs = load_onnx_model(
-            self.model_folder / "jng.scorer.onnx", device=device
+            sco_model_path,
+            device=device,
         )
         self.ffe_dtype = _tensor_dtype(self.ffe_inputs[0])
         self.kp_dtype = _tensor_dtype(self.ffe_inputs[1])
         self.sco_dtype = _tensor_dtype(self.sco_inputs[0])
+        self.ffe_image_shape = tuple(int(dim) for dim in self.ffe_inputs[0].shape[1:])
+        self.ffe_image_layout = _infer_model_image_layout(self.ffe_image_shape)
+        self.kp_shape = tuple(int(dim) for dim in self.ffe_inputs[1].shape[1:])
         self.model_type = model_type
         self.stage_profiler = stage_profiler
 
@@ -87,16 +127,27 @@ class OnlineJNGInferer:
             )
 
     def _compute_zero_latent(self):
-        zero_img = np.zeros((3, 256, 192), dtype=self.ffe_dtype)
-        zero_kp = np.zeros((17, 2), dtype=self.kp_dtype)
-        return self._extract_latent(zero_img, zero_kp)
+        zero_img = np.zeros(self.ffe_image_shape, dtype=self.ffe_dtype)
+        zero_kp = np.zeros(self.kp_shape, dtype=self.kp_dtype)
+        try:
+            return self._extract_latent(zero_img, zero_kp)
+        except RuntimeError:
+            # Keep inference robust if model-side probing fails unexpectedly.
+            latent_dim = int(self.sco_inputs[0].shape[-1])
+            return np.zeros((latent_dim,), dtype=self.sco_dtype)
 
-    def _extract_latent(self, img_chw, keypoints):
+    def _extract_latent(self, img_tensor, keypoints):
+        aligned_img = _align_image_layout(img_tensor, self.ffe_image_layout)
+        kp = np.asarray(keypoints)
+        if tuple(kp.shape) != self.kp_shape:
+            raise ValueError(
+                f"Keypoint shape mismatch. Expected {self.kp_shape}, got {tuple(kp.shape)}."
+            )
         latent = self.ffe_sess.run(
             [self.ffe_outputs[0].name],
             {
-                self.ffe_inputs[0].name: img_chw[None].astype(self.ffe_dtype),
-                self.ffe_inputs[1].name: keypoints[None].astype(self.kp_dtype),
+                self.ffe_inputs[0].name: aligned_img[None].astype(self.ffe_dtype),
+                self.ffe_inputs[1].name: kp[None].astype(self.kp_dtype),
             },
         )[0][0]
         return latent.astype(self.sco_dtype, copy=False)
@@ -135,10 +186,10 @@ class OnlineJNGInferer:
             del self.latent_history[idx]
 
     def step(self, crop_img, keypoints):
-        img_chw = _prepare_frame_input(crop_img).astype(self.ffe_dtype)
+        img_tensor = _prepare_frame_input(crop_img).astype(self.ffe_dtype)
         keypoints = np.asarray(keypoints, dtype=self.kp_dtype)
         feature_start = perf_counter()
-        latent = self._extract_latent(img_chw, keypoints)
+        latent = self._extract_latent(img_tensor, keypoints)
         if self.stage_profiler is not None:
             self.stage_profiler.add("feature", perf_counter() - feature_start)
 

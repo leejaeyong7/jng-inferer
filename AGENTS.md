@@ -1,7 +1,7 @@
 # jng-inferer Contributor Notes
 
 ## Purpose
-`jng-inferer` runs ONNX-based jump-rope inference from videos and outputs counts/scores.
+`jng-inferer` runs LiteRT-based jump-rope inference from videos and outputs counts/scores.
 
 ## Main Areas
 - `run.py`: end-to-end preprocessing + scoring.

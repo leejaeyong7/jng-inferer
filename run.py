@@ -19,6 +19,12 @@ def infer(
     realtime,
     profile_stages,
     dll_path,
+    pipeline_mode,
+    disable_prenms_detector,
+    require_prenms_detector,
+    det_keyframe_interval,
+    mp_queue_size,
+    mp_pose_batch_size,
 ):
     if with_video:
         return infer_and_write(
@@ -33,6 +39,9 @@ def infer(
             realtime=realtime,
             profile_stages=profile_stages,
             dll_path=dll_path,
+            use_prenms_detector=not disable_prenms_detector,
+            require_prenms_detector=require_prenms_detector,
+            det_keyframe_interval=det_keyframe_interval,
         )
     return infer_online(
         model_folder=model_folder,
@@ -45,6 +54,12 @@ def infer(
         realtime=realtime,
         profile_stages=profile_stages,
         dll_path=dll_path,
+        pipeline_mode=pipeline_mode,
+        use_prenms_detector=not disable_prenms_detector,
+        require_prenms_detector=require_prenms_detector,
+        det_keyframe_interval=det_keyframe_interval,
+        mp_queue_size=mp_queue_size,
+        mp_pose_batch_size=mp_pose_batch_size,
     )
 
 
@@ -69,9 +84,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["auto", "cpu", "cuda"],
-        help="ONNX runtime provider preference",
+        default="auto",
+        choices=["auto", "cpu", "nnapi", "cuda"],
+        help="ONNX Runtime provider preference. 'nnapi' falls back to CPU; 'cuda' uses CUDA if available.",
     )
     parser.add_argument(
         "--show_progress",
@@ -101,10 +116,45 @@ if __name__ == "__main__":
         help="Print decode/det/pose/feature/score(/write) stage timing summary.",
     )
     parser.add_argument(
+        "--pipeline_mode",
+        type=str,
+        default="sequential",
+        choices=["sequential", "multiprocess"],
+        help="Inference pipeline mode when --with_video is not set.",
+    )
+    parser.add_argument(
+        "--disable_prenms_detector",
+        action="store_true",
+        help="Disable pre-NMS detector path and use model's built-in postprocess outputs.",
+    )
+    parser.add_argument(
+        "--require_prenms_detector",
+        action="store_true",
+        help="Fail if pre-NMS detector model cannot be prepared.",
+    )
+    parser.add_argument(
+        "--det_keyframe_interval",
+        type=int,
+        default=3,
+        help="Run person detection every N frames and reuse the last bbox between keyframes.",
+    )
+    parser.add_argument(
+        "--mp_queue_size",
+        type=int,
+        default=8,
+        help="Queue max size per stage when --pipeline_mode=multiprocess.",
+    )
+    parser.add_argument(
+        "--mp_pose_batch_size",
+        type=int,
+        default=1,
+        help="Crop batch size inside pose+score stage when --pipeline_mode=multiprocess.",
+    )
+    parser.add_argument(
         "--dll_path",
         type=str,
         default=None,
-        help="Optional directory containing CUDA/ORT runtime DLLs to preload before session creation.",
+        help="Optional directory containing native runtime/delegate DLLs to preload before inference.",
     )
     args = parser.parse_args()
     infer(
@@ -120,4 +170,10 @@ if __name__ == "__main__":
         realtime=args.realtime,
         profile_stages=args.profile_stages,
         dll_path=args.dll_path,
+        pipeline_mode=args.pipeline_mode,
+        disable_prenms_detector=args.disable_prenms_detector,
+        require_prenms_detector=args.require_prenms_detector,
+        det_keyframe_interval=args.det_keyframe_interval,
+        mp_queue_size=args.mp_queue_size,
+        mp_pose_batch_size=args.mp_pose_batch_size,
     )

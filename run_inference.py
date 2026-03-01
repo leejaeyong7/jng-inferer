@@ -9,6 +9,9 @@ import numpy as np
 from PIL import Image
 
 from inferer import OnlineJNGInferer
+from inferer.multiprocess_pipeline import infer_online_multiprocess
+from inferer.utils.model_path_op import resolve_pose_preprocess_model_files
+from inferer.utils.prenms_op import ensure_prenms_detector_model
 from inferer.utils.dll_op import configure_dll_path
 from inferer.utils.perf_op import StageProfiler, format_stage_report
 from inferer.utils.progress_op import build_progress_callback
@@ -36,8 +39,16 @@ def _resolve_ffmpeg_path():
 
 
 FFMPEG_PATH = _resolve_ffmpeg_path()
-DETECTION_MODEL_PATH = str(BIN_DIR / "jng.det.onnx")
-KEYPOINT_MODEL_PATH = str(BIN_DIR / "jng.pose.onnx")
+
+
+def _resolve_binary_model_paths(use_prenms_detector=True, require_prenms_detector=False):
+    detection_model_path, keypoint_model_path = resolve_pose_preprocess_model_files(BIN_DIR)
+    if use_prenms_detector:
+        detection_model_path = ensure_prenms_detector_model(
+            detection_model_path,
+            required=require_prenms_detector,
+        )
+    return str(detection_model_path), str(keypoint_model_path)
 
 
 def infer_online(
@@ -45,13 +56,19 @@ def infer_online(
     video_file,
     output_folder,
     model_type="simultaneous",
-    device="cuda",
+    device="auto",
     save_processed=False,
     show_progress=False,
     decode_mode="stream",
     realtime=False,
     profile_stages=False,
     dll_path=None,
+    pipeline_mode="sequential",
+    use_prenms_detector=True,
+    require_prenms_detector=False,
+    det_keyframe_interval=3,
+    mp_queue_size=8,
+    mp_pose_batch_size=1,
 ):
     configure_dll_path(dll_path)
 
@@ -66,6 +83,32 @@ def infer_online(
         (output_path / "processed" / "images").mkdir(parents=True, exist_ok=True)
         (output_path / "processed" / "keypoints").mkdir(parents=True, exist_ok=True)
 
+    detection_model_path, keypoint_model_path = _resolve_binary_model_paths(
+        use_prenms_detector=use_prenms_detector,
+        require_prenms_detector=require_prenms_detector,
+    )
+
+    if pipeline_mode == "multiprocess":
+        counts = infer_online_multiprocess(
+            model_folder=model_folder,
+            video_file=video_file,
+            output_folder=output_folder,
+            model_type=model_type,
+            detection_model_path=detection_model_path,
+            keypoint_model_path=keypoint_model_path,
+            ffmpeg_path=FFMPEG_PATH,
+            device=device,
+            save_processed=save_processed,
+            show_progress=show_progress,
+            decode_mode=decode_mode,
+            det_keyframe_interval=det_keyframe_interval,
+            queue_size=mp_queue_size,
+            pose_batch_size=mp_pose_batch_size,
+            profile_stages=profile_stages,
+        )
+        print(f"Counts saved to {output_path / 'counts.txt'}")
+        return counts
+
     stage_profiler = StageProfiler() if profile_stages else None
     inferer = OnlineJNGInferer(
         model_folder=model_folder,
@@ -78,11 +121,12 @@ def infer_online(
     try:
         for frame_id, _, crop_img, keypoints in iter_online_processed_frames(
             ffmpeg_path=FFMPEG_PATH,
-            detection_model_path=DETECTION_MODEL_PATH,
-            keypoint_model_path=KEYPOINT_MODEL_PATH,
+            detection_model_path=detection_model_path,
+            keypoint_model_path=keypoint_model_path,
             video_path=Path(video_file),
             callback_ptr=callback_ptr,
             device=device,
+            det_keyframe_interval=det_keyframe_interval,
             decode_mode=decode_mode,
             stage_profiler=stage_profiler,
         ):
@@ -116,6 +160,12 @@ def infer(
     realtime=False,
     profile_stages=False,
     dll_path=None,
+    pipeline_mode="sequential",
+    use_prenms_detector=True,
+    require_prenms_detector=False,
+    det_keyframe_interval=3,
+    mp_queue_size=8,
+    mp_pose_batch_size=1,
 ):
     return infer_online(
         model_folder=model_folder,
@@ -126,6 +176,12 @@ def infer(
         realtime=realtime,
         profile_stages=profile_stages,
         dll_path=dll_path,
+        pipeline_mode=pipeline_mode,
+        use_prenms_detector=use_prenms_detector,
+        require_prenms_detector=require_prenms_detector,
+        det_keyframe_interval=det_keyframe_interval,
+        mp_queue_size=mp_queue_size,
+        mp_pose_batch_size=mp_pose_batch_size,
     )
 
 
@@ -145,9 +201,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["auto", "cpu", "cuda"],
-        help="ONNX runtime provider preference",
+        default="auto",
+        choices=["auto", "cpu", "nnapi", "cuda"],
+        help="ONNX Runtime provider preference. 'nnapi' falls back to CPU; 'cuda' uses CUDA if available.",
     )
     parser.add_argument(
         "--save_processed",
@@ -183,10 +239,45 @@ if __name__ == "__main__":
         help="Print decode/det/pose/feature/score stage timing summary.",
     )
     parser.add_argument(
+        "--pipeline_mode",
+        type=str,
+        default="sequential",
+        choices=["sequential", "multiprocess"],
+        help="Inference pipeline mode: sequential in-process or queue-based multiprocess pipeline.",
+    )
+    parser.add_argument(
+        "--disable_prenms_detector",
+        action="store_true",
+        help="Disable pre-NMS detector path and use model's built-in postprocess outputs.",
+    )
+    parser.add_argument(
+        "--require_prenms_detector",
+        action="store_true",
+        help="Fail if pre-NMS detector model cannot be prepared.",
+    )
+    parser.add_argument(
+        "--det_keyframe_interval",
+        type=int,
+        default=3,
+        help="Run person detection every N frames and reuse the last bbox between keyframes.",
+    )
+    parser.add_argument(
+        "--mp_queue_size",
+        type=int,
+        default=8,
+        help="Queue max size per stage when --pipeline_mode=multiprocess.",
+    )
+    parser.add_argument(
+        "--mp_pose_batch_size",
+        type=int,
+        default=1,
+        help="Crop batch size inside pose+score stage when --pipeline_mode=multiprocess.",
+    )
+    parser.add_argument(
         "--dll_path",
         type=str,
         default=None,
-        help="Optional directory containing CUDA/ORT runtime DLLs to preload before session creation.",
+        help="Optional directory containing native runtime/delegate DLLs to preload before inference.",
     )
     args = parser.parse_args()
     infer_online(
@@ -201,4 +292,10 @@ if __name__ == "__main__":
         realtime=args.realtime,
         profile_stages=args.profile_stages,
         dll_path=args.dll_path,
+        pipeline_mode=args.pipeline_mode,
+        use_prenms_detector=not args.disable_prenms_detector,
+        require_prenms_detector=args.require_prenms_detector,
+        det_keyframe_interval=args.det_keyframe_interval,
+        mp_queue_size=args.mp_queue_size,
+        mp_pose_batch_size=args.mp_pose_batch_size,
     )

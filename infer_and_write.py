@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from inferer import OnlineJNGInferer
+from inferer.utils.model_path_op import resolve_pose_preprocess_model_files
+from inferer.utils.prenms_op import ensure_prenms_detector_model
 from inferer.utils.dll_op import configure_dll_path
 from inferer.utils.perf_op import StageProfiler, format_stage_report
 from inferer.utils.progress_op import build_progress_callback
@@ -40,9 +42,17 @@ def _resolve_ffmpeg_path():
 
 
 FFMPEG_PATH = _resolve_ffmpeg_path()
-DETECTION_MODEL_PATH = str(BIN_DIR / "jng.det.onnx")
-KEYPOINT_MODEL_PATH = str(BIN_DIR / "jng.pose.onnx")
 FONT_PATH = str(BIN_DIR / "superbasic.ttf")
+
+
+def _resolve_binary_model_paths(use_prenms_detector=True, require_prenms_detector=False):
+    detection_model_path, keypoint_model_path = resolve_pose_preprocess_model_files(BIN_DIR)
+    if use_prenms_detector:
+        detection_model_path = ensure_prenms_detector_model(
+            detection_model_path,
+            required=require_prenms_detector,
+        )
+    return str(detection_model_path), str(keypoint_model_path)
 
 
 def _load_font(size=96):
@@ -136,13 +146,16 @@ def infer_and_write(
     video_file,
     output_folder,
     model_type="simultaneous",
-    device="cuda",
+    device="auto",
     show_progress=False,
     visualize_tracking=False,
     decode_mode="stream",
     realtime=False,
     profile_stages=False,
     dll_path=None,
+    use_prenms_detector=True,
+    require_prenms_detector=False,
+    det_keyframe_interval=3,
 ):
     configure_dll_path(dll_path)
 
@@ -170,6 +183,10 @@ def infer_and_write(
         model_type=model_type,
         device=device,
         stage_profiler=stage_profiler,
+    )
+    detection_model_path, keypoint_model_path = _resolve_binary_model_paths(
+        use_prenms_detector=use_prenms_detector,
+        require_prenms_detector=require_prenms_detector,
     )
     draw_font = _load_font()
     callback_ptr, close_progress = build_progress_callback(show_progress)
@@ -224,11 +241,12 @@ def infer_and_write(
     try:
         for frame_id, raw_frame, crop_img, keypoints in iter_online_processed_frames(
             ffmpeg_path=FFMPEG_PATH,
-            detection_model_path=DETECTION_MODEL_PATH,
-            keypoint_model_path=KEYPOINT_MODEL_PATH,
+            detection_model_path=detection_model_path,
+            keypoint_model_path=keypoint_model_path,
             video_path=Path(video_file),
             callback_ptr=callback_ptr,
             device=device,
+            det_keyframe_interval=det_keyframe_interval,
             decode_mode=decode_mode,
             stage_profiler=stage_profiler,
         ):
@@ -340,6 +358,9 @@ def infer(
     realtime=False,
     profile_stages=False,
     dll_path=None,
+    use_prenms_detector=True,
+    require_prenms_detector=False,
+    det_keyframe_interval=3,
 ):
     return infer_and_write(
         model_folder=model_folder,
@@ -352,6 +373,9 @@ def infer(
         realtime=realtime,
         profile_stages=profile_stages,
         dll_path=dll_path,
+        use_prenms_detector=use_prenms_detector,
+        require_prenms_detector=require_prenms_detector,
+        det_keyframe_interval=det_keyframe_interval,
     )
 
 
@@ -371,9 +395,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["auto", "cpu", "cuda"],
-        help="ONNX runtime provider preference",
+        default="auto",
+        choices=["auto", "cpu", "nnapi", "cuda"],
+        help="ONNX Runtime provider preference. 'nnapi' falls back to CPU; 'cuda' uses CUDA if available.",
     )
     parser.add_argument(
         "--future_context_policy",
@@ -409,10 +433,26 @@ if __name__ == "__main__":
         help="Print decode/det/pose/feature/score/write stage timing summary.",
     )
     parser.add_argument(
+        "--disable_prenms_detector",
+        action="store_true",
+        help="Disable pre-NMS detector path and use model's built-in postprocess outputs.",
+    )
+    parser.add_argument(
+        "--require_prenms_detector",
+        action="store_true",
+        help="Fail if pre-NMS detector model cannot be prepared.",
+    )
+    parser.add_argument(
+        "--det_keyframe_interval",
+        type=int,
+        default=3,
+        help="Run person detection every N frames and reuse the last bbox between keyframes.",
+    )
+    parser.add_argument(
         "--dll_path",
         type=str,
         default=None,
-        help="Optional directory containing CUDA/ORT runtime DLLs to preload before session creation.",
+        help="Optional directory containing native runtime/delegate DLLs to preload before inference.",
     )
     args = parser.parse_args()
     infer_and_write(
@@ -427,4 +467,7 @@ if __name__ == "__main__":
         realtime=args.realtime,
         profile_stages=args.profile_stages,
         dll_path=args.dll_path,
+        use_prenms_detector=not args.disable_prenms_detector,
+        require_prenms_detector=args.require_prenms_detector,
+        det_keyframe_interval=args.det_keyframe_interval,
     )

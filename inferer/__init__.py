@@ -6,6 +6,7 @@ from .utils.onnx_op import (
     load_score_computer,
     batchfiy_latents,
 )
+from .utils.model_path_op import resolve_feature_score_model_files
 from .online_inferer import OnlineJNGInferer
 
 
@@ -22,8 +23,9 @@ def compute_scores(
     imgs, kps = parallel_load_data(processed_path)
 
     # run inference with the loaded imgs and kps
-    ffe = load_frame_feature_extractor(model_path / "jng.feature.onnx", device=device)
-    sco = load_score_computer(model_path / "jng.scorer.onnx", device=device)
+    ffe_model_path, sco_model_path = resolve_feature_score_model_files(model_path)
+    ffe = load_frame_feature_extractor(ffe_model_path, device=device)
+    sco = load_score_computer(sco_model_path, device=device)
     if callback_ptr is not None:
         callback = callback_ptr()
     else:
