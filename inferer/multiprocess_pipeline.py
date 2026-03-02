@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import multiprocessing as mp
-import shutil
-import tempfile
 import traceback
 from pathlib import Path
 from queue import Empty, Full
@@ -18,9 +16,7 @@ from modules.preprocessor.preprocess.utils.rtm_ops import (
     load_multi_detection_model,
 )
 from modules.preprocessor.preprocess.utils.video_ops import (
-    enumerate_vid,
-    extract_video,
-    get_vid_count,
+    iter_extracted_video,
     iter_video_stream,
 )
 from modules.preprocessor.preprocess.preprocess import _select_online_bbox
@@ -74,7 +70,6 @@ def _frame_feeder_worker(
     stop_event,
 ):
     stage_stats = {}
-    tmp_dir = None
     try:
         video_path = Path(video_path)
         if decode_mode == "stream":
@@ -89,10 +84,11 @@ def _frame_feeder_worker(
                 _put_or_wait(frame_queue, (frame_id, frame, total_frames_hint), stop_event)
                 _record_stage(stage_stats, "decode", perf_counter() - put_start)
         elif decode_mode == "extract":
-            tmp_dir = Path(tempfile.mkdtemp(prefix="jng_mp_decode_"))
-            extract_video(ffmpeg_path, video_path, tmp_dir)
-            total_frames = get_vid_count(tmp_dir)
-            for frame_id, frame in enumerate_vid(tmp_dir, total=total_frames):
+            for frame_id, frame, total_frames in iter_extracted_video(
+                ffmpeg_bin=ffmpeg_path,
+                video_file_path=video_path,
+                fps=24,
+            ):
                 if stop_event.is_set():
                     break
                 put_start = perf_counter()
@@ -103,8 +99,6 @@ def _frame_feeder_worker(
     except Exception:  # noqa: BLE001
         _report_worker_error("frame_feeder", err_queue, stop_event)
     finally:
-        if tmp_dir is not None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
         _put_or_wait(frame_queue, _SENTINEL, stop_event)
         stage_queue.put(("frame_feeder", stage_stats))
 
